@@ -254,7 +254,7 @@ static int parse_args(int argc, char **argv) {
         listen_port = strdup(optarg);
         break;
       case 's':
-        dns_servers = strdup(optarg);
+        dns_servers = optarg;
         break;
       case 'S':
         foreign_dns_servers = strdup(optarg);
@@ -306,9 +306,11 @@ static int resolve_dns_servers() {
   struct addrinfo hints;
   struct addrinfo *addr_ip;
   char* token;
+  char* dns_servers_buf;
   int r;
   int i = 0;
-  char *pch = strchr(dns_servers, ',');
+  dns_servers_buf = strdup(dns_servers);
+  char *pch = strchr(dns_servers_buf, ',');
   has_chn_dns = 1;
   int has_foreign_dns = 0;
   dns_servers_len = 1;
@@ -336,7 +338,7 @@ static int resolve_dns_servers() {
   memset(&hints, 0, sizeof(hints));
   hints.ai_family = AF_INET;
   hints.ai_socktype = SOCK_DGRAM; /* Datagram socket */
-  token = strtok(dns_servers, ",");
+  token = strtok(dns_servers_buf, ",");
   while (token) {
     char *port;
     memset(global_buf, 0, BUF_SIZE);
@@ -751,14 +753,18 @@ static int should_filter_query(ns_msg msg, struct in_addr dns_addr) {
     type = ns_rr_type(rr);
     rd = ns_rr_rdata(rr);
     if (type == ns_t_a) {
-      if (verbose)
-        printf("%s, ", inet_ntoa(*(struct in_addr *)rd));
-      if (question_type == ns_t_aaaa)
+      if (question_type == ns_t_aaaa) {
+        if (verbose)
+          printf("%s, ", inet_ntoa(*(struct in_addr *)rd));
         return 1;
+      }
       r = bsearch(rd, ip_list.ips, ip_list.entries, sizeof(struct in_addr),
                   cmp_in_addr);
-      if (r)
+      if (r) {
+        if (verbose)
+          printf("%s, ", inet_ntoa(*(struct in_addr *)rd));
         return -1;
+      }
     }
   }
   for (rrnum = 0; rrnum < rrmax; rrnum++) {
