@@ -745,6 +745,8 @@ static int should_filter_query(ns_msg msg, struct in_addr dns_addr) {
   question_type = type_from_question(msg);
   rrmax = ns_msg_count(msg, ns_s_an);
 
+  if (dns_is_chn && question_type == ns_t_aaaa && rrmax == 0)
+    return -1;
   if (!dns_clean && dns_is_foreign && rrmax == 1) {
     if (local_ns_parserr(&msg, ns_s_an, 0, &rr)) {
       ERR("local_ns_parserr");
