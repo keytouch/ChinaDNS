@@ -370,6 +370,7 @@ static int resolve_dns_servers() {
       return 0;
     }
   }
+  free(dns_servers_buf);
   return 0;
 }
 
