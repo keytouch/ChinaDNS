@@ -14,7 +14,7 @@
     You should have received a copy of the GNU General Public License
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
-
+#include <config.h>
 #include <fcntl.h>
 #include <netdb.h>
 #include <resolv.h>
@@ -32,8 +32,6 @@
 #include <sys/param.h>
 
 #include "local_ns_parser.h"
-
-#include "config.h"
 
 typedef struct {
   uint16_t id;
@@ -77,7 +75,7 @@ static int dns_clean = 0;
 static const char *default_dns_servers =
 "114.114.114.114,223.5.5.5";
 static const char *default_foreign_dns_servers =
-"8.8.8.8,8.8.4.4,208.67.222.222:443,208.67.222.222:5353";
+"8.8.8.8,8.8.4.4,208.67.222.222#443,208.67.222.222#5353";
 static char *dns_servers = NULL;
 static char *foreign_dns_servers = NULL;
 static int dns_servers_len;
@@ -110,7 +108,7 @@ static void dns_handle_remote();
 
 static const char *hostname_from_question(ns_msg msg);
 static u_int type_from_question(ns_msg msg);
-static int should_filter_query(ns_msg msg, struct in_addr dns_addr);
+static int should_filter_query(ns_msg msg, struct in6_addr dns_addr);
 
 static void queue_add(id_addr_t id_addr);
 static id_addr_t *queue_lookup(uint16_t id);
@@ -336,14 +334,14 @@ static int resolve_dns_servers() {
   dns_server_addrs = calloc(dns_servers_len, sizeof(id_addr_t));
 
   memset(&hints, 0, sizeof(hints));
-  hints.ai_family = AF_INET;
+  hints.ai_family = AF_INET6;
   hints.ai_socktype = SOCK_DGRAM; /* Datagram socket */
   token = strtok(dns_servers_buf, ",");
   while (token) {
     char *port;
     memset(global_buf, 0, BUF_SIZE);
     strncpy(global_buf, token, BUF_SIZE - 1);
-    port = (strrchr(global_buf, ':'));
+    port = (strrchr(global_buf, '#'));
     if (port) {
       *port = '\0';
       port++;
@@ -351,8 +349,14 @@ static int resolve_dns_servers() {
       port = "53";
     }
     if (0 != (r = getaddrinfo(global_buf, port, &hints, &addr_ip))) {
-      VERR("%s:%s\n", gai_strerror(r), token);
-      return -1;
+      if (EAI_ADDRFAMILY == r) { // conversion needed
+        char buf[30] = "::ffff:";
+        strncpy(buf + 7, global_buf, 16);
+        getaddrinfo(buf, port, &hints, &addr_ip);
+      } else {
+        VERR("%s:%s\n", gai_strerror(r), token);
+        return -1;
+      }
     }
 
     dns_server_addrs[i].addr = addr_ip->ai_addr;
@@ -552,7 +556,7 @@ static int dns_init_sockets() {
     return -1;
   }
   freeaddrinfo(addr_ip);
-  remote_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  remote_sock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
   if (0 != setnonblock(remote_sock))
     return -1;
   return 0;
@@ -613,13 +617,14 @@ static void dns_handle_local() {
 }
 
 static void dns_handle_remote() {
-  struct sockaddr *src_addr = malloc(sizeof(struct sockaddr));
-  socklen_t src_len = sizeof(struct sockaddr);
+  struct sockaddr *src_addr = malloc(sizeof(struct sockaddr_in6));
+  socklen_t src_len = sizeof(struct sockaddr_in6);
   uint16_t query_id;
   ssize_t len;
   const char *question_hostname;
   int r;
   ns_msg msg;
+  char src_sddr_str_buf[64];
   len = recvfrom(remote_sock, global_buf, BUF_SIZE, 0, src_addr, &src_len);
   if (len > 0) {
     if (local_ns_initparse((const u_char *)global_buf, len, &msg) < 0) {
@@ -631,15 +636,17 @@ static void dns_handle_remote() {
     query_id = ns_msg_id(msg);
     question_hostname = hostname_from_question(msg);
     if (question_hostname) {
+      inet_ntop(AF_INET6, &((struct sockaddr_in6 *)src_addr)->sin6_addr,
+                src_sddr_str_buf, 64);
       LOG("response %s from %s:%d - ", question_hostname,
-          inet_ntoa(((struct sockaddr_in *)src_addr)->sin_addr),
-          htons(((struct sockaddr_in *)src_addr)->sin_port));
+          src_sddr_str_buf,
+          htons(((struct sockaddr_in6 *)src_addr)->sin6_port));
     }
     id_addr_t *id_addr = queue_lookup(query_id);
     if (id_addr) {
       uint16_t ns_old_id = htons(id_addr->old_id);
       memcpy(global_buf, &ns_old_id, 2);
-      r = should_filter_query(msg, ((struct sockaddr_in *)src_addr)->sin_addr);
+      r = should_filter_query(msg, ((struct sockaddr_in6 *)src_addr)->sin6_addr);
       if (r == 0) {
         if (verbose)
           printf("pass\n");
@@ -727,15 +734,19 @@ static u_int type_from_question(ns_msg msg) {
   return 0;
 }
 
-static int should_filter_query(ns_msg msg, struct in_addr dns_addr) {
+static int should_filter_query(ns_msg msg, struct in6_addr dns_addr) {
   ns_rr rr;
   int rrnum, rrmax;
   void *r;
+  char buf[64];
+  char *bufp = buf;
   // TODO cache result for each dns server
   int dns_is_chn = 0;
   int dns_is_foreign = 0;
   if (chnroute_file && (dns_servers_len > 1)) {
-    if (NULL != strstr(dns_servers, inet_ntoa(dns_addr)))
+    inet_ntop(AF_INET6, &dns_addr, bufp, 64);
+    if (bufp == strstr(bufp, "::ffff:")) bufp = bufp + 7;
+    if (NULL != strstr(dns_servers, bufp))
       dns_is_chn = 1;
     dns_is_foreign = !dns_is_chn;
   }
@@ -797,7 +808,7 @@ static int should_filter_query(ns_msg msg, struct in_addr dns_addr) {
         }
       }
     } else if (type == ns_t_aaaa) {
-        return 0;
+      return 0;
     }
   }
   return 0;
